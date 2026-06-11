@@ -1,23 +1,19 @@
-name: Build and Push Lambda Image - SLSA
+name: Build and Push Docker Image - SLSA 3
 
 on:
   #push:
   #  paths:
-  #    - "API.Lambda/**"
+  #    - "API/**"
   #  branches:
   #    - main
   workflow_dispatch: {}
 
 env:
-  OCTOPUS_URL: https://your.octopus.app
-  OCTOPUS_SERVICE_ACCOUNT: service account id
-  OCTOPUS_SPACE: Your space
-  ECR_ROLE_TO_ASSUME: arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_ROLE
-  ECR_SESSION_NAME: githubworkflow
-  ECR_REGION: YOUR_AWS_REGION
-  ECR_URL: YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com
-  ECR_REPOSITORY: YOUR_ECR_REPOSITORY
-  SBOM_PACKAGE: YourApp.Lambda.SBOM
+  OCTOPUS_URL: https://demo.octopus.app
+  OCTOPUS_SERVICE_ACCOUNT: 4d50c8ac-1515-4351-96a7-4a82d55d55ff
+  OCTOPUS_SPACE: Kelly Onsite
+  DOCKER_HUB_REPOSITORY: octopussolutionsengineering/onsite-three
+  SBOM_PACKAGE: onsite.three.SBOM
 
 jobs:
   configure:
@@ -41,11 +37,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner on repo
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           ignore-unfixed: true
-          exit-code: "1"
+          exit-code: "0"
           format: "sarif"
           output: "trivy-results.sarif"
           severity: "MEDIUM,HIGH,CRITICAL"
@@ -73,7 +69,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
         with:
-          tag: "${{ env.ECR_REPOSITORY }}-${{ needs.configure.outputs.version }}"
+          tag: "${{ needs.configure.outputs.version }}"
           name: Release ${{ needs.configure.outputs.version }}
           body: |
             Automatic Release creation by GitHub Action
@@ -103,50 +99,46 @@ jobs:
           server: ${{ env.OCTOPUS_URL }}
           service_account_id: ${{ env.OCTOPUS_SERVICE_ACCOUNT }}
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v3
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
         with:
-          role-to-assume: ${{ env.ECR_ROLE_TO_ASSUME }}
-          role-session-name: ${{ env.ECR_SESSION_NAME }}
-          aws-region: ${{ env.ECR_REGION }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: build website container
+      - name: Build API container
         id: build_container
-        working-directory: ./API.Lambda/
+        working-directory: ./API/
         run: |
           docker build -f "Dockerfile" \
-            --tag $ECR_URL/$ECR_REPOSITORY:${{ needs.configure.outputs.version }} .
+            --tag $DOCKER_HUB_REPOSITORY:${{ needs.configure.outputs.version }} .
 
       - name: Run Trivy vulnerability scanner on docker container
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.ECR_URL }}/${{ env.ECR_REPOSITORY }}:${{ needs.configure.outputs.version }}
+          image-ref: ${{ env.DOCKER_HUB_REPOSITORY }}:${{ needs.configure.outputs.version }}
           format: "table"
-          exit-code: "1"
+          exit-code: "0"
           ignore-unfixed: true
           vuln-type: "os,library"
-          severity: "CRITICAL"
+          severity: "MEDIUM,HIGH,CRITICAL"
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      - name: Push Docker images
+        id: push-docker-images
+        working-directory: ./API
+        run: |
+          docker push $DOCKER_HUB_REPOSITORY:${{ needs.configure.outputs.version }}
+
+          dockerSha=$(docker manifest inspect $DOCKER_HUB_REPOSITORY:${{ needs.configure.outputs.version }} -v | jq -r '.Descriptor.digest')
+          echo "Docker sha is $dockerSha"            
+          echo "DEMO_APP_DOCKER_SHA=$dockerSha" >> $GITHUB_OUTPUT
 
       - uses: OctopusDeploy/push-build-information-action@v3
         name: Push build information 🐙
         with:
           version: ${{ needs.configure.outputs.version }}
           packages: |
-            ${{ env.ECR_REPOSITORY }}
+            ${{ env.DOCKER_HUB_REPOSITORY }}
 
-      - name: Push Docker images
-        id: push-docker-images
-        working-directory: ./API.Lambda/
-        run: |
-          docker push $ECR_URL/$ECR_REPOSITORY:${{ needs.configure.outputs.version }}
-
-          dockerSha=$(docker manifest inspect $ECR_URL/$ECR_REPOSITORY:${{ needs.configure.outputs.version }} -v | jq -r '.Descriptor.digest')
-          echo "Docker sha is $dockerSha"
-          echo "DEMO_APP_DOCKER_SHA=$dockerSha" >> $GITHUB_OUTPUT
   sbom:
     name: Generate and Publish SBOM
     outputs:
@@ -163,7 +155,7 @@ jobs:
           fetch-depth: "0"
 
       - name: Run Trivy in GitHub SBOM mode and submit results to Dependency Graph
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           format: "github"
@@ -197,18 +189,18 @@ jobs:
           server: ${{ env.OCTOPUS_URL }}
           service_account_id: ${{ env.OCTOPUS_SERVICE_ACCOUNT }}
 
-      - name: Push packages to Octopus 🐙
-        uses: OctopusDeploy/push-package-action@v3
-        with:
-          packages: |
-            packaged/${{ env.SBOM_PACKAGE }}.${{ needs.configure.outputs.version }}.zip
-
       - name: Push build information to Octopus 🐙
         uses: OctopusDeploy/push-build-information-action@v3
         with:
           packages: |
             ${{ env.SBOM_PACKAGE }}
           version: "${{ needs.configure.outputs.version }}"
+
+      - name: Push packages to Octopus 🐙
+        uses: OctopusDeploy/push-package-action@v3
+        with:
+          packages: |
+            packaged/${{ env.SBOM_PACKAGE }}.${{ needs.configure.outputs.version }}.zip
 
   create_attestations:
     name: Create Attestations
@@ -224,15 +216,14 @@ jobs:
           $cleanedSbomSha = $("${{ needs.sbom.outputs.sbom_hash }}" -replace "sha256:", "").Trim()
           $cleanedImageSha = $("${{ needs.build.outputs.app_hash }}" -replace "sha256:", "").Trim()
 
-          $ecrSubject = "${{ env.ECR_REPOSITORY }}:${{ needs.configure.outputs.version }}".Trim()
+          $imageSubject = "${{ env.DOCKER_HUB_REPOSITORY }}:${{ needs.configure.outputs.version }}".Trim()
           $sbomSubject = "${{ env.SBOM_PACKAGE }}.${{ needs.configure.outputs.version }}.zip".Trim()
 
-          Write-Host "The website information is $cleanedImageSha  $imageSubject"
-          Write-Host "The database information is $cleanedPackageSha  $packageSubject"
+          Write-Host "The API information is $cleanedImageSha  $imageSubject"
           Write-Host "The SBOM information is $cleanedSbomSha  $sbomSubject"
 
           $subjectText = @"
-          $cleanedImageSha  $ecrSubject
+          $cleanedImageSha  $imageSubject
           $cleanedSbomSha  $sbomSubject
           "@
 

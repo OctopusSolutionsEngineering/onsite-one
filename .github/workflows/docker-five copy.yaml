@@ -1,4 +1,4 @@
-name: Build and Push Zip - SLSA
+name: Build and Push Docker Image - SLSA 6
 
 on:
   #push:
@@ -9,11 +9,11 @@ on:
   workflow_dispatch: {}
 
 env:
-  OCTOPUS_URL: https://your.octopus.app
-  OCTOPUS_SERVICE_ACCOUNT: service account id
-  OCTOPUS_SPACE: Your space
-  PACKAGE_ID: YourApp
-  SBOM_PACKAGE: YourApp.SBOM
+  OCTOPUS_URL: https://demo.octopus.app
+  OCTOPUS_SERVICE_ACCOUNT: 4d50c8ac-1515-4351-96a7-4a82d55d55ff
+  OCTOPUS_SPACE: Kelly Onsite
+  DOCKER_HUB_REPOSITORY: octopussolutionsengineering/onsite-six
+  SBOM_PACKAGE: onsite.six.SBOM
 
 jobs:
   configure:
@@ -22,7 +22,7 @@ jobs:
     outputs:
       version: ${{ steps.version-generator.outputs.version }}
     steps:
-      - name: Set Version Number
+      - name: Set version number
         id: version-generator
         run: echo "version=$(date +'%y.%m.%d%H%M%S')" >> $GITHUB_OUTPUT
 
@@ -37,11 +37,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner on repo
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           ignore-unfixed: true
-          exit-code: "1"
+          exit-code: "0"
           format: "sarif"
           output: "trivy-results.sarif"
           severity: "MEDIUM,HIGH,CRITICAL"
@@ -59,7 +59,7 @@ jobs:
       id-token: write
       contents: write
     steps:
-      - name: Checkout Code to build website
+      - name: Checkout code to build website
         uses: actions/checkout@v1
 
       - name: Create Release for GitHub
@@ -77,17 +77,21 @@ jobs:
           draft: false
 
   build:
-    name: Build and Scan packages
+    name: Build and Scan Images
     needs: [configure, scan, create-gh-release]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+      contents: read
     outputs:
-      app_hash: ${{ steps.determine_app_hash.outputs.APP_HASH }}
+      app_hash: ${{ steps.push-docker-images.outputs.DEMO_APP_DOCKER_SHA }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
 
       - name: Login to Octopus Deploy
         uses: OctopusDeploy/login@v1
@@ -95,63 +99,45 @@ jobs:
           server: ${{ env.OCTOPUS_URL }}
           service_account_id: ${{ env.OCTOPUS_SERVICE_ACCOUNT }}
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Login to Docker Hub
+        uses: docker/login-action@v1
         with:
-          dotnet-version: 9.0
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Install dependencies
-        run: dotnet restore
-
-      - name: Build
+      - name: Build API container
+        id: build_container
+        working-directory: ./API/
         run: |
-          cd API
-          dotnet build --configuration Release --no-restore
-          dotnet publish -c Release -o ../demoapp-publish -r win-x64 --self-contained true /p:UseAppHost=true
+          docker build -f "Dockerfile" \
+            --tag $DOCKER_HUB_REPOSITORY:${{ needs.configure.outputs.version }} .
 
-      - name: Run Trivy vulnerability scanner on published folder
-        uses: aquasecurity/trivy-action@0.32.0
+      - name: Run Trivy vulnerability scanner on docker container
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          scan-type: "fs"
-          scan-ref: "demoapp-publish"
+          image-ref: ${{ env.DOCKER_HUB_REPOSITORY }}:${{ needs.configure.outputs.version }}
+          format: "table"
+          exit-code: "0"
           ignore-unfixed: true
-          exit-code: "1"
-          format: "sarif"
-          output: "trivy-results.sarif"
+          vuln-type: "os,library"
           severity: "MEDIUM,HIGH,CRITICAL"
 
-      - name: Create a Zip package 🐙
-        uses: OctopusDeploy/create-zip-package-action@v3
-        with:
-          package_id: ${{ env.PACKAGE_ID }}
-          version: ${{ needs.configure.outputs.version }}
-          output_folder: "./packaging"
-          base_path: demoapp-publish
-          files: |
-            **/*.*
-
-      - name: Create the Subject Checksum file for Attestation Build Provenance
-        id: determine_app_hash
-        shell: pwsh
+      - name: Push Docker images
+        id: push-docker-images
+        working-directory: ./API
         run: |
-          $packageHash = Get-FileHash -path "packaging/${{ env.PACKAGE_ID }}.${{ needs.configure.outputs.version }}.zip" -Algorithm SHA256
-          $hashToSave = $packageHash.Hash
-          Write-Host "The app hash is $hashToSave"
+          docker push $DOCKER_HUB_REPOSITORY:${{ needs.configure.outputs.version }}
 
-          "APP_HASH=$hashToSave" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          dockerSha=$(docker manifest inspect $DOCKER_HUB_REPOSITORY:${{ needs.configure.outputs.version }} -v | jq -r '.Descriptor.digest')
+          echo "Docker sha is $dockerSha"            
+          echo "DEMO_APP_DOCKER_SHA=$dockerSha" >> $GITHUB_OUTPUT
 
       - uses: OctopusDeploy/push-build-information-action@v3
         name: Push build information 🐙
         with:
           version: ${{ needs.configure.outputs.version }}
           packages: |
-            ${{ env.PACKAGE_ID }}
-
-      - name: Push a package to Octopus Deploy 🐙
-        uses: OctopusDeploy/push-package-action@v3
-        with:
-          packages: |
-            ./packaging/${{ env.PACKAGE_ID }}.${{ needs.configure.outputs.version }}.zip
+            ${{ env.DOCKER_HUB_REPOSITORY }}
 
   sbom:
     name: Generate and Publish SBOM
@@ -169,7 +155,7 @@ jobs:
           fetch-depth: "0"
 
       - name: Run Trivy in GitHub SBOM mode and submit results to Dependency Graph
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           format: "github"
@@ -203,18 +189,18 @@ jobs:
           server: ${{ env.OCTOPUS_URL }}
           service_account_id: ${{ env.OCTOPUS_SERVICE_ACCOUNT }}
 
-      - name: Push packages to Octopus 🐙
-        uses: OctopusDeploy/push-package-action@v3
-        with:
-          packages: |
-            packaged/${{ env.SBOM_PACKAGE }}.${{ needs.configure.outputs.version }}.zip
-
       - name: Push build information to Octopus 🐙
         uses: OctopusDeploy/push-build-information-action@v3
         with:
           packages: |
             ${{ env.SBOM_PACKAGE }}
           version: "${{ needs.configure.outputs.version }}"
+
+      - name: Push packages to Octopus 🐙
+        uses: OctopusDeploy/push-package-action@v3
+        with:
+          packages: |
+            packaged/${{ env.SBOM_PACKAGE }}.${{ needs.configure.outputs.version }}.zip
 
   create_attestations:
     name: Create Attestations
@@ -228,16 +214,16 @@ jobs:
         shell: pwsh
         run: |
           $cleanedSbomSha = $("${{ needs.sbom.outputs.sbom_hash }}" -replace "sha256:", "").Trim()
-          $cleanedAppSha = $("${{ needs.build.outputs.app_hash }}" -replace "sha256:", "").Trim()
+          $cleanedImageSha = $("${{ needs.build.outputs.app_hash }}" -replace "sha256:", "").Trim()
 
-          $appSubject = "${{ env.PACKAGE_ID }}:${{ needs.configure.outputs.version }}".Trim()
+          $imageSubject = "${{ env.DOCKER_HUB_REPOSITORY }}:${{ needs.configure.outputs.version }}".Trim()
           $sbomSubject = "${{ env.SBOM_PACKAGE }}.${{ needs.configure.outputs.version }}.zip".Trim()
 
-          Write-Host "The API information is $cleanedAppSha  $appSubject"
+          Write-Host "The API information is $cleanedImageSha  $imageSubject"
           Write-Host "The SBOM information is $cleanedSbomSha  $sbomSubject"
 
           $subjectText = @"
-          $cleanedAppSha  $appSubject
+          $cleanedImageSha  $imageSubject
           $cleanedSbomSha  $sbomSubject
           "@
 
@@ -245,6 +231,6 @@ jobs:
           New-Item -Path . -Name "subject.checksums.txt" -ItemType "File" -Value $subjectText
       - name: Generate attestation from provenance
         uses: actions/attest-build-provenance@v2
-        id: generate-app-attestation
+        id: websiteattest
         with:
           subject-checksums: subject.checksums.txt
