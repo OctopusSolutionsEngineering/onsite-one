@@ -2,8 +2,8 @@ name: Build and Push Docker Image - SLSA 1
 
 on:
   push:
-    paths:
-      - "API/**"
+    #paths:
+    #  - "API/**"
     branches:
       - main
   workflow_dispatch: {}
