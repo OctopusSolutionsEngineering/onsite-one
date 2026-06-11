@@ -9,11 +9,11 @@ on:
   workflow_dispatch: {}
 
 env:
-  OCTOPUS_URL: https://your.octopus.app
-  OCTOPUS_SERVICE_ACCOUNT: service account id
-  OCTOPUS_SPACE: Your space
-  DOCKER_HUB_REPOSITORY: Your docker hub repository
-  SBOM_PACKAGE: YourApp.SBOM
+  OCTOPUS_URL: https://demo.octopus.app
+  OCTOPUS_SERVICE_ACCOUNT: 4d50c8ac-1515-4351-96a7-4a82d55d55ff
+  OCTOPUS_SPACE: Kelly Onsite
+  DOCKER_HUB_REPOSITORY: octopussolutionsengineering/onsite-one
+  SBOM_PACKAGE: onsite.one.SBOM
 
 jobs:
   configure:
@@ -37,7 +37,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy vulnerability scanner on repo
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           ignore-unfixed: true
@@ -113,7 +113,7 @@ jobs:
             --tag $DOCKER_HUB_REPOSITORY:${{ needs.configure.outputs.version }} .
 
       - name: Run Trivy vulnerability scanner on docker container
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.DOCKER_HUB_REPOSITORY }}:${{ needs.configure.outputs.version }}
           format: "table"
@@ -155,7 +155,7 @@ jobs:
           fetch-depth: "0"
 
       - name: Run Trivy in GitHub SBOM mode and submit results to Dependency Graph
-        uses: aquasecurity/trivy-action@0.32.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: "fs"
           format: "github"
